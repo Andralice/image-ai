@@ -1,0 +1,22 @@
+[Unit]
+Description=Right Code (rightapi.ai) async -> OpenAI sync proxy
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+Environment=UPSTREAM_BASE=https://www.rightapi.ai
+Environment=UPSTREAM_KEY=sk-b5bec36f9e994159af28c05c9f044210
+Environment=LISTEN_HOST=0.0.0.0
+Environment=LISTEN_PORT=8090
+Environment=POLL_INTERVAL=1.5
+Environment=POLL_MAX_SECS=180
+ExecStart=/usr/bin/python3 /opt/gpt-image-2/proxy/async_proxy.py
+Restart=always
+RestartSec=3
+StandardOutput=append:/opt/gpt-image-2/logs/proxy.log
+StandardError=append:/opt/gpt-image-2/logs/proxy.log
+
+[Install]
+WantedBy=multi-user.target

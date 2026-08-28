@@ -1,0 +1,268 @@
+name: Publish GHCR Image
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to build, usually a release tag such as v0.6.1
+        required: true
+        default: v0.6.1
+        type: string
+      version:
+        description: Image version tag without leading v. Defaults to ref without leading v.
+        required: false
+        type: string
+      latest:
+        description: Also tag this image as latest
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  packages: write
+  attestations: write
+  id-token: write
+
+concurrency:
+  group: ghcr-${{ github.event.release.tag_name || inputs.ref || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: wangnov/gpt-image-2
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      ref: ${{ steps.release.outputs.ref }}
+      version: ${{ steps.release.outputs.version }}
+      docker_version: ${{ steps.release.outputs.docker_version }}
+      docker_ref_tag: ${{ steps.release.outputs.docker_ref_tag }}
+      publish_latest: ${{ steps.release.outputs.publish_latest }}
+      tags: ${{ steps.meta.outputs.tags }}
+      labels: ${{ steps.meta.outputs.labels }}
+      annotations: ${{ steps.meta.outputs.annotations }}
+    steps:
+      - name: Resolve release inputs
+        id: release
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+          DISPATCH_REF: ${{ inputs.ref }}
+          DISPATCH_VERSION: ${{ inputs.version }}
+          DISPATCH_LATEST: ${{ inputs.latest }}
+        run: |
+          ref="${RELEASE_TAG:-${DISPATCH_REF:-}}"
+          if [[ -z "$ref" ]]; then
+            ref="$GITHUB_REF_NAME"
+          fi
+          ref_tag="${ref#refs/tags/}"
+          ref_tag="${ref_tag#refs/heads/}"
+
+          version="${DISPATCH_VERSION:-}"
+          if [[ -z "$version" ]]; then
+            version="${ref_tag#v}"
+          fi
+
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Expected a SemVer version such as 0.6.1, got: $version" >&2
+            exit 1
+          fi
+
+          docker_version="${version//+/-}"
+          docker_ref_tag="${ref_tag//+/-}"
+          publish_latest="${DISPATCH_LATEST:-true}"
+          if [[ "$RELEASE_PRERELEASE" == "true" ]]; then
+            publish_latest="false"
+          fi
+          # A SemVer prerelease (e.g. 0.8.0-rc.1) must never take the
+          # latest tag, no matter how this workflow was invoked — the
+          # release-event prerelease flag is absent on workflow_dispatch.
+          core_version="${version%%+*}"
+          if [[ "$core_version" == *-* ]]; then
+            publish_latest="false"
+          fi
+
+          {
+            echo "ref=$ref"
+            echo "version=$version"
+            echo "docker_version=$docker_version"
+            echo "docker_ref_tag=$docker_ref_tag"
+            echo "publish_latest=$publish_latest"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ steps.release.outputs.ref }}
+          persist-credentials: false
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        env:
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: index,manifest
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ steps.release.outputs.docker_version }}
+            type=raw,value=${{ steps.release.outputs.docker_ref_tag }}
+            type=raw,value=latest,enable=${{ steps.release.outputs.publish_latest == 'true' }}
+          labels: |
+            org.opencontainers.image.title=GPT Image 2 Web
+            org.opencontainers.image.description=Self-hosted Docker Web runtime for GPT Image 2
+            org.opencontainers.image.source=https://github.com/Wangnov/gpt-image-2-skill
+            org.opencontainers.image.url=https://github.com/Wangnov/gpt-image-2-skill
+            org.opencontainers.image.documentation=https://github.com/Wangnov/gpt-image-2-skill/blob/main/docs/docker-web.md
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.version=${{ steps.release.outputs.version }}
+          annotations: |
+            org.opencontainers.image.title=GPT Image 2 Web
+            org.opencontainers.image.description=Self-hosted Docker Web runtime for GPT Image 2
+            org.opencontainers.image.source=https://github.com/Wangnov/gpt-image-2-skill
+            org.opencontainers.image.version=${{ steps.release.outputs.version }}
+
+  build:
+    needs: prepare
+    name: build (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            artifact: linux-amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            artifact: linux-arm64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push platform image
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          pull: true
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          labels: ${{ needs.prepare.outputs.labels }}
+          annotations: ${{ needs.prepare.outputs.annotations }}
+          cache-from: type=gha,scope=gpt-image-2-web-${{ matrix.artifact }}
+          cache-to: type=gha,mode=max,scope=gpt-image-2-web-${{ matrix.artifact }}
+          provenance: true
+          sbom: true
+
+      - name: Export digest
+        shell: bash
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: digests-${{ matrix.artifact }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs:
+      - prepare
+      - build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download digests
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Create multi-arch manifest
+        id: manifest
+        shell: bash
+        env:
+          TAGS: ${{ needs.prepare.outputs.tags }}
+          VERSION_TAG: ${{ needs.prepare.outputs.docker_version }}
+        run: |
+          tag_args=()
+          while IFS= read -r tag; do
+            if [[ -n "$tag" ]]; then
+              tag_args+=("-t" "$tag")
+            fi
+          done <<< "$TAGS"
+
+          sources=()
+          for digest_file in /tmp/digests/*; do
+            sources+=("${REGISTRY}/${IMAGE_NAME}@sha256:$(basename "$digest_file")")
+          done
+
+          docker buildx imagetools create \
+            --annotation "index:org.opencontainers.image.title=GPT Image 2 Web" \
+            --annotation "index:org.opencontainers.image.description=Self-hosted Docker Web runtime for GPT Image 2" \
+            --annotation "index:org.opencontainers.image.source=https://github.com/Wangnov/gpt-image-2-skill" \
+            --annotation "index:org.opencontainers.image.version=${{ needs.prepare.outputs.version }}" \
+            "${tag_args[@]}" \
+            "${sources[@]}"
+
+          primary="${REGISTRY}/${IMAGE_NAME}:${VERSION_TAG}"
+          digest="$(docker buildx imagetools inspect "$primary" --format '{{.Manifest.Digest}}')"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Generate artifact attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          push-to-registry: true
+
+      - name: Summarize image
+        shell: bash
+        env:
+          TAGS: ${{ needs.prepare.outputs.tags }}
+        run: |
+          {
+            echo "### GHCR image"
+            echo
+            echo "- Image: \`${REGISTRY}/${IMAGE_NAME}\`"
+            echo "- Version: \`${{ needs.prepare.outputs.version }}\`"
+            echo "- Digest: \`${{ steps.manifest.outputs.digest }}\`"
+            echo "- Tags:"
+            while IFS= read -r tag; do
+              [[ -n "$tag" ]] && echo "  - \`$tag\`"
+            done <<< "$TAGS"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,20 @@
+services:
+  gpt-image-2-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: gpt-image-2-web:local
+    container_name: gpt-image-2-web
+    restart: unless-stopped
+    # 用 host network,这样容器能直接访问 host 上的 proxy(127.0.0.1:8090)
+    network_mode: host
+    env_file:
+      - .env
+    volumes:
+      - ./data:/data/gpt-image-2
+      - ./codex:/data/codex
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,149 @@
+name: Post Release Verify
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version without leading v
+        required: true
+        type: string
+      verify_desktop_cask:
+        description: Verify the desktop app Homebrew cask for this version
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-binstall:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            binary: gpt-image-2-skill
+          - runner: ubuntu-22.04-arm
+            binary: gpt-image-2-skill
+          - runner: ubuntu-24.04
+            binary: gpt-image-2-skill
+          - runner: macos-15
+            binary: gpt-image-2-skill
+          - runner: windows-2025
+            binary: gpt-image-2-skill.exe
+    env:
+      VERSION: ${{ github.event_name == 'release' && github.event.release.tag_name || format('v{0}', inputs.version) }}
+    steps:
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 26.6.0
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@dc19f1e48450eefe5a29b8da6c6b00a87d730b37 # v1.18.1
+        with:
+          version: 1.18.1
+      - name: Install CLI with cargo-binstall
+        shell: bash
+        run: cargo binstall gpt-image-2-skill --version "${VERSION#v}" --no-confirm
+      - name: Smoke test
+        shell: bash
+        run: |
+          gpt-image-2-skill --json doctor >/tmp/gpt-image-2-skill-doctor.json
+
+  npm-install:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+          - runner: ubuntu-22.04-arm
+          - runner: ubuntu-24.04
+          - runner: macos-15
+          - runner: windows-2025
+    env:
+      VERSION: ${{ github.event_name == 'release' && github.event.release.tag_name || format('v{0}', inputs.version) }}
+    steps:
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 26.6.0
+          registry-url: https://registry.npmjs.org
+      - name: Wait for npm package visibility
+        shell: bash
+        run: |
+          version="${VERSION#v}"
+          for attempt in $(seq 1 20); do
+            if npm view "gpt-image-2-skill@${version}" version >/tmp/gpt-image-2-skill-npm-version.txt 2>/dev/null; then
+              cat /tmp/gpt-image-2-skill-npm-version.txt
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "Timed out waiting for gpt-image-2-skill@${version} to appear on npm"
+          exit 1
+      - name: Install from npm
+        shell: bash
+        run: npm install --global "gpt-image-2-skill@${VERSION#v}"
+      - name: Smoke test
+        shell: bash
+        run: gpt-image-2-skill --json doctor >/tmp/gpt-image-2-skill-npm-doctor.json
+      - name: Smoke test static fallback package
+        if: ${{ runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          node <<'NODE'
+          const childProcess = require("node:child_process");
+          const fs = require("node:fs");
+          const path = require("node:path");
+
+          const packageName = process.arch === "arm64"
+            ? "gpt-image-2-skill-linux-arm64-static"
+            : "gpt-image-2-skill-linux-x64-static";
+          const globalRoot = childProcess.execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim();
+          const candidates = [
+            path.join(globalRoot, "gpt-image-2-skill", "node_modules", packageName, "bin", "gpt-image-2-skill"),
+            path.join(globalRoot, packageName, "bin", "gpt-image-2-skill"),
+          ];
+          const binary = candidates.find((candidate) => fs.existsSync(candidate));
+          if (!binary) {
+            throw new Error(`Unable to locate ${packageName} binary. Tried: ${candidates.join(", ")}`);
+          }
+          const fileOutput = childProcess.execFileSync("file", [binary], { encoding: "utf8" });
+          process.stdout.write(fileOutput);
+          if (/interpreter /.test(fileOutput) || !/static/.test(fileOutput)) {
+            throw new Error(`${packageName} is not static: ${fileOutput}`);
+          }
+          childProcess.execFileSync(binary, ["--json", "config", "path"], { stdio: "inherit" });
+          NODE
+
+  homebrew:
+    runs-on: macos-15
+    env:
+      VERSION: ${{ github.event_name == 'release' && github.event.release.tag_name || format('v{0}', inputs.version) }}
+    steps:
+      - name: Install formula
+        run: brew install wangnov/tap/gpt-image-2-skill
+      - name: Smoke test
+        run: gpt-image-2-skill --json doctor >/tmp/gpt-image-2-skill-brew-doctor.json
+
+  homebrew-cask:
+    runs-on: macos-15
+    if: ${{ inputs.verify_desktop_cask }}
+    env:
+      VERSION: ${{ github.event_name == 'release' && github.event.release.tag_name || format('v{0}', inputs.version) }}
+    steps:
+      - name: Install desktop app cask
+        run: brew install --cask wangnov/tap/gpt-image-2
+      - name: Verify app bundle
+        run: |
+          app="/Applications/GPT Image 2.app"
+          version="${VERSION#v}"
+
+          test -d "$app"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$app/Contents/Info.plist" | grep -Fx "com.wangnov.gpt-image-2"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$app/Contents/Info.plist" | grep -Fx "$version"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          otool -L "$app/Contents/MacOS/gpt-image-2-app" | tee /tmp/gpt-image-2-app-otool.txt
+          ! grep -E '^[[:space:]]+/(opt/homebrew|usr/local)/|libssl|libcrypto' /tmp/gpt-image-2-app-otool.txt

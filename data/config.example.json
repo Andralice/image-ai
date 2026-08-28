@@ -1,0 +1,29 @@
+{
+  "_comment": "Template config for gpt-image-2-web. Copy to data/config.json and fill in your real key. DO NOT commit the real config.json — it has secrets.",
+  "version": 1,
+  "default_provider": "right-codes",
+  "providers": {
+    "right-codes": {
+      "type": "openai-compatible",
+      "api_base": "http://127.0.0.1:8090/v1",
+      "model": "gpt-image-2",
+      "credentials": {
+        "api_key": {
+          "source": "env",
+          "env": "OPENAI_API_KEY"
+        }
+      }
+    },
+    "right-codes-vip": {
+      "type": "openai-compatible",
+      "api_base": "http://127.0.0.1:8090/v1",
+      "model": "gpt-image-2-vip",
+      "credentials": {
+        "api_key": {
+          "source": "env",
+          "env": "OPENAI_API_KEY"
+        }
+      }
+    }
+  }
+}
