@@ -1823,7 +1823,7 @@ name = "gpt-image-2-core"
 version = "0.7.3"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "clap",
  "dirs",
@@ -1864,7 +1864,7 @@ name = "gpt-image-2-web"
 version = "0.7.3"
 dependencies = [
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "gpt-image-2-core",
  "gpt-image-2-runtime",
  "hmac",
